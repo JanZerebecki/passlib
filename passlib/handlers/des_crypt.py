@@ -8,8 +8,8 @@ import logging; log = logging.getLogger(__name__)
 from warnings import warn
 # site
 # pkg
-from passlib.utils import classproperty, h64, h64big, safe_crypt, test_crypt, to_unicode
-from passlib.utils.compat import b, bytes, byte_elem_value, u, uascii_to_str, unicode
+from passlib.utils import h64, h64big, safe_crypt, test_crypt, to_unicode
+from passlib.utils.compat import byte_elem_value, u, uascii_to_str, unicode
 from passlib.utils.des import des_encrypt_int_block
 import passlib.utils.handlers as uh
 # local
@@ -23,7 +23,7 @@ __all__ = [
 #=============================================================================
 # pure-python backend for des_crypt family
 #=============================================================================
-_BNULL = b('\x00')
+_BNULL = b'\x00'
 
 def _crypt_secret_to_key(secret):
     """convert secret to 64-bit DES key.
@@ -33,7 +33,7 @@ def _crypt_secret_to_key(secret):
     a null parity bit is inserted after every 7th bit of the output.
     """
     # NOTE: this would set the parity bits correctly,
-    # but des_encrypt_int_block() would just ignore them...
+    #       but des_encrypt_int_block() would just ignore them...
     ##return sum(expand_7bit(byte_elem_value(c) & 0x7f) << (56-i*8)
     ##           for i, c in enumerate(secret[:8]))
     return sum((byte_elem_value(c) & 0x7f) << (57-i*8)
@@ -44,15 +44,12 @@ def _raw_des_crypt(secret, salt):
     assert len(salt) == 2
 
     # NOTE: some OSes will accept non-HASH64 characters in the salt,
-    # but what value they assign these characters varies wildy,
-    # so just rejecting them outright.
-    # NOTE: the same goes for single-character salts...
-    # some OSes duplicate the char, some insert a '.' char,
-    # and openbsd does something which creates an invalid hash.
-    try:
-        salt_value = h64.decode_int12(salt)
-    except ValueError: # pragma: no cover - always caught by class
-        raise ValueError("invalid chars in salt")
+    #       but what value they assign these characters varies wildy,
+    #       so just rejecting them outright.
+    #       the same goes for single-character salts...
+    #       some OSes duplicate the char, some insert a '.' char,
+    #       and openbsd does (something) which creates an invalid hash.
+    salt_value = h64.decode_int12(salt)
 
     # gotta do something - no official policy since this predates unicode
     if isinstance(secret, unicode):
@@ -73,12 +70,12 @@ def _raw_des_crypt(secret, salt):
     return h64big.encode_int64(result)
 
 def _bsdi_secret_to_key(secret):
-    """covert secret to DES key used by bsdi_crypt"""
+    """convert secret to DES key used by bsdi_crypt"""
     key_value = _crypt_secret_to_key(secret)
     idx = 8
     end = len(secret)
     while idx < end:
-        next = idx+8
+        next = idx + 8
         tmp_value = _crypt_secret_to_key(secret[idx:next])
         key_value = des_encrypt_int_block(key_value, key_value) ^ tmp_value
         idx = next
@@ -88,10 +85,7 @@ def _raw_bsdi_crypt(secret, rounds, salt):
     """pure-python backend for bsdi_crypt"""
 
     # decode salt
-    try:
-        salt_value = h64.decode_int24(salt)
-    except ValueError: # pragma: no cover - always caught by class
-        raise ValueError("invalid salt")
+    salt_value = h64.decode_int24(salt)
 
     # gotta do something - no official policy since this predates unicode
     if isinstance(secret, unicode):
@@ -176,24 +170,33 @@ class des_crypt(uh.HasManyBackends, uh.HasSalt, uh.GenericHandler):
     #===================================================================
     backends = ("os_crypt", "builtin")
 
-    _has_backend_builtin = True
-
-    @classproperty
-    def _has_backend_os_crypt(cls):
-        return test_crypt("test", 'abgOeLfPimXQo')
-
-    def _calc_checksum_builtin(self, secret):
-        return _raw_des_crypt(secret, self.salt.encode("ascii")).decode("ascii")
+    #---------------------------------------------------------------
+    # os_crypt backend
+    #---------------------------------------------------------------
+    @classmethod
+    def _load_backend_os_crypt(cls):
+        if test_crypt("test", 'abgOeLfPimXQo'):
+            return cls._calc_checksum_os_crypt
+        return None
 
     def _calc_checksum_os_crypt(self, secret):
-        # NOTE: safe_crypt encodes unicode secret -> utf8
-        # no official policy since des-crypt predates unicode
+        # NOTE: we let safe_crypt() encode unicode secret -> utf8;
+        #       no official policy since des-crypt predates unicode
         hash = safe_crypt(secret, self.salt)
         if hash:
             assert hash.startswith(self.salt) and len(hash) == 13
             return hash[2:]
-        else:
-            return self._calc_checksum_builtin(secret)
+        return self._try_alternate_backends(secret)
+
+    #---------------------------------------------------------------
+    # builtin backend
+    #---------------------------------------------------------------
+    @classmethod
+    def _load_backend_builtin(cls):
+        return cls._calc_checksum_builtin
+
+    def _calc_checksum_builtin(self, secret):
+        return _raw_des_crypt(secret, self.salt.encode("ascii")).decode("ascii")
 
     #===================================================================
     # eoc
@@ -286,7 +289,8 @@ class bsdi_crypt(uh.HasManyBackends, uh.HasRounds, uh.HasSalt, uh.GenericHandler
     # validation
     #===================================================================
 
-    # flag so CryptContext won't generate even rounds.
+    # NOTE: keeping this flag for admin/choose_rounds.py script.
+    #       want to eventually expose rounds logic to that script in better way.
     _avoid_even_rounds = True
 
     def _norm_rounds(self, rounds):
@@ -298,32 +302,39 @@ class bsdi_crypt(uh.HasManyBackends, uh.HasRounds, uh.HasSalt, uh.GenericHandler
                  uh.exc.PasslibSecurityWarning)
         return rounds
 
-    @classmethod
-    def _bind_needs_update(cls, **settings):
-        return cls._needs_update
+    def _generate_rounds(self):
+        rounds = super(bsdi_crypt, self)._generate_rounds()
+        # ensure autogenerated rounds are always odd
+        # NOTE: doing this even for default_rounds so needs_update() doesn't get
+        #       caught in a loop.
+        # FIXME: this technically might generate a rounds value 1 larger
+        # than the requested upper bound - but better to err on side of safety.
+        return rounds|1
 
-    @classmethod
-    def _needs_update(cls, hash, secret):
+    #===================================================================
+    # migration
+    #===================================================================
+
+    def _calc_needs_update(self, **kwds):
         # mark bsdi_crypt hashes as deprecated if they have even rounds.
-        assert cls.identify(hash)
-        if isinstance(hash, unicode):
-            hash = hash.encode("ascii")
-        rounds = h64.decode_int24(hash[1:5])
-        return not rounds & 1
+        if not self.rounds & 1:
+            return True
+        # hand off to base implementation
+        return super(bsdi_crypt, self)._calc_needs_update(**kwds)
 
     #===================================================================
     # backends
     #===================================================================
     backends = ("os_crypt", "builtin")
 
-    _has_backend_builtin = True
-
-    @classproperty
-    def _has_backend_os_crypt(cls):
-        return test_crypt("test", '_/...lLDAxARksGCHin.')
-
-    def _calc_checksum_builtin(self, secret):
-        return _raw_bsdi_crypt(secret, self.rounds, self.salt.encode("ascii")).decode("ascii")
+    #---------------------------------------------------------------
+    # os_crypt backend
+    #---------------------------------------------------------------
+    @classmethod
+    def _load_backend_os_crypt(cls):
+        if test_crypt("test", '_/...lLDAxARksGCHin.'):
+            return cls._calc_checksum_os_crypt
+        return None
 
     def _calc_checksum_os_crypt(self, secret):
         config = self.to_string()
@@ -331,8 +342,17 @@ class bsdi_crypt(uh.HasManyBackends, uh.HasRounds, uh.HasSalt, uh.GenericHandler
         if hash:
             assert hash.startswith(config[:9]) and len(hash) == 20
             return hash[-11:]
-        else:
-            return self._calc_checksum_builtin(secret)
+        return self._try_alternate_backends(secret)
+
+    #---------------------------------------------------------------
+    # builtin backend
+    #---------------------------------------------------------------
+    @classmethod
+    def _load_backend_builtin(cls):
+        return cls._calc_checksum_builtin
+
+    def _calc_checksum_builtin(self, secret):
+        return _raw_bsdi_crypt(secret, self.rounds, self.salt.encode("ascii")).decode("ascii")
 
     #===================================================================
     # eoc

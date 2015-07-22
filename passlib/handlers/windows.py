@@ -4,13 +4,12 @@
 #=============================================================================
 # core
 from binascii import hexlify
-import re
 import logging; log = logging.getLogger(__name__)
 from warnings import warn
 # site
 # pkg
 from passlib.utils import to_unicode, right_pad_string
-from passlib.utils.compat import b, bytes, str_to_uascii, u, unicode, uascii_to_str
+from passlib.utils.compat import unicode
 from passlib.utils.md4 import md4
 import passlib.utils.handlers as uh
 # local
@@ -62,7 +61,7 @@ class lmhash(uh.HasEncodingContext, uh.StaticHandler):
         return hexlify(self.raw(secret, self.encoding)).decode("ascii")
 
     # magic constant used by LMHASH
-    _magic = b("KGS!@#$%")
+    _magic = b"KGS!@#$%"
 
     @classmethod
     def raw(cls, secret, encoding=None):

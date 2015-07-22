@@ -5,12 +5,11 @@
 # core
 import hashlib
 import logging; log = logging.getLogger(__name__)
-from warnings import warn
 # site
 # pkg
-from passlib.utils import classproperty, h64, safe_crypt, test_crypt, \
+from passlib.utils import h64, safe_crypt, test_crypt, \
                           repeat_string, to_unicode
-from passlib.utils.compat import b, bytes, byte_elem_value, irange, u, \
+from passlib.utils.compat import byte_elem_value, u, \
                                  uascii_to_str, unicode
 import passlib.utils.handlers as uh
 # local
@@ -23,7 +22,7 @@ __all__ = [
 # pure-python backend, used by both sha256_crypt & sha512_crypt
 # when crypt.crypt() backend is not available.
 #=============================================================================
-_BNULL = b('\x00')
+_BNULL = b'\x00'
 
 # pre-calculated offsets used to speed up C digest stage (see notes below).
 # sequence generated using the following:
@@ -71,6 +70,19 @@ def _raw_sha2_crypt(pwd, salt, rounds, use_512=False):
     #===================================================================
     # init & validate inputs
     #===================================================================
+
+    # NOTE: the setup portion of this algorithm scales ~linearly in time
+    #       with the size of the password, making it vulnerable to a DOS from
+    #       unreasonably large inputs. the following code has some optimizations
+    #       which would make things even worse, using O(pwd_len**2) memory
+    #       when calculating digest P. 
+    #
+    #       to mitigate these two issues: 1) this code switches to a 
+    #       O(pwd_len)-memory algorithm for passwords that are much larger 
+    #       than average, and 2) Passlib enforces a library-wide max limit on
+    #       the size of passwords it will allow, to prevent this algorithm and 
+    #       others from being DOSed in this way (see passlib.exc.PasswordSizeError
+    #       for details).
 
     # validate secret
     if isinstance(pwd, unicode):
@@ -134,11 +146,12 @@ def _raw_sha2_crypt(pwd, salt, rounds, use_512=False):
     # digest P from password - used instead of password itself
     #                          when calculating digest C.
     #===================================================================
-    if pwd_len < 64:
-        # method this is faster under python, but uses O(pwd_len**2) memory
-        # so we don't use it for larger passwords, to avoid a potential DOS.
+    if pwd_len < 96:
+        # this method is faster under python, but uses O(pwd_len**2) memory;
+        # so we don't use it for larger passwords to avoid a potential DOS.
         dp = repeat_string(hash_const(pwd * pwd_len).digest(), pwd_len)
     else:
+        # this method is slower under python, but uses a fixed amount of memory.
         tmp_ctx = hash_const(pwd)
         tmp_ctx_update = tmp_ctx.update
         i = pwd_len-1
@@ -335,13 +348,18 @@ class _SHA2_Common(uh.HasManyBackends, uh.HasRounds, uh.HasSalt,
     #===================================================================
     backends = ("os_crypt", "builtin")
 
-    _has_backend_builtin = True
+    #---------------------------------------------------------------
+    # os_crypt backend
+    #---------------------------------------------------------------
 
-    # _has_backend_os_crypt - provided by subclass
+    #: test hash for OS detection -- provided by subclass
+    _test_hash = None
 
-    def _calc_checksum_builtin(self, secret):
-        return _raw_sha2_crypt(secret, self.salt, self.rounds,
-                               self._cdb_use_512)
+    @classmethod
+    def _load_backend_os_crypt(cls):
+        if test_crypt(*cls._test_hash):
+            return cls._calc_checksum_os_crypt
+        return None
 
     def _calc_checksum_os_crypt(self, secret):
         hash = safe_crypt(secret, self.to_string())
@@ -351,8 +369,18 @@ class _SHA2_Common(uh.HasManyBackends, uh.HasRounds, uh.HasSalt,
             cs = self.checksum_size
             assert hash.startswith(self.ident) and hash[-cs-1] == _UDOLLAR
             return hash[-cs:]
-        else:
-            return self._calc_checksum_builtin(secret)
+        return self._try_alternate_backends(secret)
+
+    #---------------------------------------------------------------
+    # builtin backend
+    #---------------------------------------------------------------
+    @classmethod
+    def _load_backend_builtin(cls):
+        return cls._calc_checksum_builtin
+
+    def _calc_checksum_builtin(self, secret):
+        return _raw_sha2_crypt(secret, self.salt, self.rounds,
+                               self._cdb_use_512)
 
     #===================================================================
     # eoc
@@ -407,10 +435,8 @@ class sha256_crypt(_SHA2_Common):
     #===================================================================
     # backends
     #===================================================================
-    @classproperty
-    def _has_backend_os_crypt(cls):
-        return test_crypt("test", "$5$rounds=1000$test$QmQADEXMG8POI5W"
-                                         "Dsaeho0P36yK3Tcrgboabng6bkb/")
+    _test_hash = ("test", "$5$rounds=1000$test$QmQADEXMG8POI5W"
+                          "Dsaeho0P36yK3Tcrgboabng6bkb/")
 
     #===================================================================
     # eoc
@@ -470,12 +496,10 @@ class sha512_crypt(_SHA2_Common):
     #===================================================================
     # backend
     #===================================================================
-    @classproperty
-    def _has_backend_os_crypt(cls):
-        return test_crypt("test", "$6$rounds=1000$test$2M/Lx6Mtobqj"
-                                          "Ljobw0Wmo4Q5OFx5nVLJvmgseatA6oMn"
-                                          "yWeBdRDx4DU.1H3eGmse6pgsOgDisWBG"
-                                          "I5c7TZauS0")
+    _test_hash = ("test", "$6$rounds=1000$test$2M/Lx6Mtobqj"
+                          "Ljobw0Wmo4Q5OFx5nVLJvmgseatA6oMn"
+                          "yWeBdRDx4DU.1H3eGmse6pgsOgDisWBG"
+                          "I5c7TZauS0")
 
     #===================================================================
     # eoc

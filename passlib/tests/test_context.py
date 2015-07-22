@@ -9,22 +9,18 @@ if PY3:
     from configparser import NoSectionError
 else:
     from ConfigParser import NoSectionError
-import hashlib
 import logging; log = logging.getLogger(__name__)
-import re
 import os
-import time
 import warnings
-import sys
 # site
 # pkg
 from passlib import hash
 from passlib.context import CryptContext, LazyCryptContext
 from passlib.exc import PasslibConfigWarning
-from passlib.utils import tick, to_bytes, to_unicode
-from passlib.utils.compat import irange, u, unicode, str_to_uascii, PY2
+from passlib.utils import tick, to_unicode
+from passlib.utils.compat import irange, u, unicode, str_to_uascii, PY2, PY26
 import passlib.utils.handlers as uh
-from passlib.tests.utils import TestCase, catch_warnings, set_file, TICK_RESOLUTION, quicksleep
+from passlib.tests.utils import TestCase, set_file, TICK_RESOLUTION, quicksleep
 from passlib.registry import (register_crypt_handler_path,
                         _has_crypt_handler as has_crypt_handler,
                         _unload_handler_name as unload_handler_name,
@@ -822,11 +818,10 @@ sha512_crypt__min_rounds = 45000
         dump = ctx.to_string()
 
         # check ctx->string returns canonical format.
-        # NOTE: ConfigParser for PY26 and earlier didn't use OrderedDict,
-        # so to_string() won't get order correct.
-        # so we skip this test.
-        import sys
-        if sys.version_info >= (2,7):
+        # NOTE: ConfigParser for PY26 doesn't use OrderedDict,
+        #       making to_string()'s ordering unpredictable...
+        #       so we skip this test under PY26.
+        if not PY26:
             self.assertEqual(dump, self.sample_1_unicode)
 
         # check ctx->string->ctx->dict returns original
@@ -1106,22 +1101,16 @@ sha512_crypt__min_rounds = 45000
         self.assertTrue(cc.needs_update('$5$rounds=3001$QlFHHifXvpFX4PLs$/0ekt7lSs/lOikSerQ0M/1porEHxYq7W/2hdFpxA3fA'))
 
         #--------------------------------------------------------------
-        # test _bind_needs_update() framework
+        # test hash.needs_update() interface
         #--------------------------------------------------------------
-        bind_state = []
         check_state = []
         class dummy(uh.StaticHandler):
             name = 'dummy'
             _hash_prefix = '@'
 
             @classmethod
-            def _bind_needs_update(cls, **settings):
-                bind_state.append(settings)
-                return cls._needs_update
-
-            @classmethod
-            def _needs_update(cls, hash, secret):
-                check_state.append((hash,secret))
+            def needs_update(cls, hash, secret=None):
+                check_state.append((hash, secret))
                 return secret == "nu"
 
             def _calc_checksum(self, secret):
@@ -1130,11 +1119,8 @@ sha512_crypt__min_rounds = 45000
                     secret = secret.encode("utf-8")
                 return str_to_uascii(md5(secret).hexdigest())
 
-        # creating context should call bind function w/ settings
-        ctx = CryptContext([dummy])
-        self.assertEqual(bind_state, [{}])
-
         # calling needs_update should query callback
+        ctx = CryptContext([dummy])
         hash = refhash = dummy.encrypt("test")
         self.assertFalse(ctx.needs_update(hash))
         self.assertEqual(check_state, [(hash,None)])
@@ -1434,72 +1420,6 @@ sha512_crypt__min_rounds = 45000
     #===================================================================
     # feature tests
     #===================================================================
-    def test_60_min_verify_time(self):
-        """test verify() honors min_verify_time"""
-        delta = .05
-        if TICK_RESOLUTION >= delta/10:
-            raise self.skipTest("timer not accurate enough")
-        min_delay = 2*delta
-        min_verify_time = 5*delta
-        max_delay = 8*delta
-
-        class TimedHash(uh.StaticHandler):
-            """psuedo hash that takes specified amount of time"""
-            name = "timed_hash"
-            delay = 0
-
-            @classmethod
-            def identify(cls, hash):
-                return True
-
-            def _calc_checksum(self, secret):
-                quicksleep(self.delay)
-                return to_unicode(secret + 'x')
-
-        # check mvt issues a warning, and then filter for remainder of test
-        with self.assertWarningList(["'min_verify_time' is deprecated"]*2):
-            cc = CryptContext([TimedHash], min_verify_time=min_verify_time,
-                admin__context__min_verify_time=min_verify_time*2)
-        warnings.filterwarnings("ignore", "'min_verify_time' is deprecated")
-
-        def timecall(func, *args, **kwds):
-            start = tick()
-            result = func(*args, **kwds)
-            return tick()-start, result
-
-        # verify genhash delay works
-        TimedHash.delay = min_delay
-        elapsed, result = timecall(TimedHash.genhash, 'stub', None)
-        self.assertEqual(result, 'stubx')
-        self.assertAlmostEqual(elapsed, min_delay, delta=delta)
-
-        # ensure min verify time is honored
-
-            # correct password
-        elapsed, result = timecall(cc.verify, "stub", "stubx")
-        self.assertTrue(result)
-        self.assertAlmostEqual(elapsed, min_delay, delta=delta)
-
-            # incorrect password
-        elapsed, result = timecall(cc.verify, "blob", "stubx")
-        self.assertFalse(result)
-        self.assertAlmostEqual(elapsed, min_verify_time, delta=delta)
-
-            # incorrect password w/ special category setting
-        elapsed, result = timecall(cc.verify, "blob", "stubx", category="admin")
-        self.assertFalse(result)
-        self.assertAlmostEqual(elapsed, min_verify_time*2, delta=delta)
-
-        # ensure taking longer emits a warning.
-        TimedHash.delay = max_delay
-        with self.assertWarningList(".*verify exceeded min_verify_time"):
-            elapsed, result = timecall(cc.verify, "blob", "stubx")
-        self.assertFalse(result)
-        self.assertAlmostEqual(elapsed, max_delay, delta=delta)
-
-        # reject values < 0
-        self.assertRaises(ValueError, CryptContext, min_verify_time=-1)
-
     def test_61_autodeprecate(self):
         """test deprecated='auto' is handled correctly"""
 

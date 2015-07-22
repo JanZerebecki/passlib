@@ -13,12 +13,15 @@ try:
 except ImportError:
     log.debug("django installation not found")
     DJANGO_VERSION = ()
+else:
+    if DJANGO_VERSION < (1,4):
+        raise RuntimeError("passlib.ext.django requires django >= 1.4 (as of passlib 1.7)")
 # pkg
 from passlib.context import CryptContext
 from passlib.exc import PasslibRuntimeWarning
 from passlib.registry import get_crypt_handler, list_crypt_handlers
 from passlib.utils import classproperty
-from passlib.utils.compat import bytes, get_method_function, iteritems
+from passlib.utils.compat import get_method_function, iteritems, OrderedDict
 # local
 __all__ = [
     "get_preset_config",
@@ -55,9 +58,7 @@ def get_preset_config(name):
         if not DJANGO_VERSION:
             raise ValueError("can't resolve django-default preset, "
                              "django not installed")
-        if DJANGO_VERSION < (1,4):
-            name = "django-1.0"
-        elif DJANGO_VERSION < (1,6):
+        if DJANGO_VERSION < (1,6):
             name = "django-1.4"
         else:
             name = "django-1.6"
@@ -188,7 +189,6 @@ class _HasherWrapper(object):
     def safe_summary(self, encoded):
         from django.contrib.auth.hashers import mask_hash
         from django.utils.translation import ugettext_noop as _
-        from django.utils.datastructures import SortedDict
         handler = self.passlib_handler
         items = [
             # since this is user-facing, we're reporting passlib's name,
@@ -200,7 +200,7 @@ class _HasherWrapper(object):
             for key, value in iteritems(kwds):
                 key = self._translate_kwds.get(key, key)
                 items.append((_(key), value))
-        return SortedDict(items)
+        return OrderedDict(items)
 
     # added in django 1.6
     def must_update(self, encoded):
@@ -225,12 +225,7 @@ def get_passlib_hasher(handler, algorithm=None):
     Note that the format of the handler won't be altered,
     so will probably not be compatible with Django's algorithm format,
     so the monkeypatch provided by this plugin must have been applied.
-
-    .. note::
-        This function requires Django 1.4 or later.
     """
-    if DJANGO_VERSION < (1,4):
-        raise RuntimeError("get_passlib_hasher() requires Django >= 1.4")
     if isinstance(handler, str):
         handler = get_crypt_handler(handler)
     if hasattr(handler, "django_name"):

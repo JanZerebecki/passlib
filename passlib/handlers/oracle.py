@@ -7,11 +7,10 @@ from binascii import hexlify, unhexlify
 from hashlib import sha1
 import re
 import logging; log = logging.getLogger(__name__)
-from warnings import warn
 # site
 # pkg
-from passlib.utils import to_unicode, to_native_str, xor_bytes
-from passlib.utils.compat import b, bytes, bascii_to_str, irange, u, \
+from passlib.utils import to_unicode, xor_bytes
+from passlib.utils.compat import irange, u, \
                                  uascii_to_str, unicode, str_to_uascii
 from passlib.utils.des import des_encrypt_block
 import passlib.utils.handlers as uh
@@ -24,7 +23,7 @@ __all__ = [
 #=============================================================================
 # oracle10
 #=============================================================================
-def des_cbc_encrypt(key, value, iv=b('\x00') * 8, pad=b('\x00')):
+def des_cbc_encrypt(key, value, iv=b'\x00' * 8, pad=b'\x00'):
     """performs des-cbc encryption, returns only last block.
 
     this performs a specific DES-CBC encryption implementation
@@ -48,7 +47,7 @@ def des_cbc_encrypt(key, value, iv=b('\x00') * 8, pad=b('\x00')):
     return hash
 
 # magic string used as initial des key by oracle10
-ORACLE10_MAGIC = b("\x01\x23\x45\x67\x89\xAB\xCD\xEF")
+ORACLE10_MAGIC = b"\x01\x23\x45\x67\x89\xAB\xCD\xEF"
 
 class oracle10(uh.HasUserContext, uh.StaticHandler):
     """This class implements the password hash used by Oracle up to version 10g, and follows the :ref:`password-hash-api`.

@@ -5,19 +5,16 @@
 #=============================================================================
 from __future__ import with_statement
 # core
-from hashlib import md5
 import logging; log = logging.getLogger(__name__)
 import os
-import sys
 from warnings import warn
 # site
 # pkg
 from passlib.context import CryptContext
 from passlib.exc import ExpectedStringError
 from passlib.hash import htdigest
-from passlib.utils import consteq, render_bytes, to_bytes, deprecated_method, is_ascii_codec
-from passlib.utils.compat import b, bytes, join_bytes, str_to_bascii, u, \
-                                 unicode, BytesIO, iteritems, imap, PY3
+from passlib.utils import render_bytes, to_bytes, deprecated_method, is_ascii_codec
+from passlib.utils.compat import join_bytes, unicode, BytesIO, iteritems, PY3, OrderedDict
 # local
 __all__ = [
     'HtpasswdFile',
@@ -29,44 +26,10 @@ __all__ = [
 #=============================================================================
 _UNSET = object()
 
-_BCOLON = b(":")
+_BCOLON = b":"
 
 # byte values that aren't allowed in fields.
-_INVALID_FIELD_CHARS = b(":\n\r\t\x00")
-
-#=============================================================================
-# backport of OrderedDict for PY2.5
-#=============================================================================
-try:
-    from collections import OrderedDict
-except ImportError:
-    # Python 2.5
-    class OrderedDict(dict):
-        """hacked OrderedDict replacement.
-
-        NOTE: this doesn't provide a full OrderedDict implementation,
-        just the minimum needed by the Htpasswd internals.
-        """
-        def __init__(self):
-            self._keys = []
-
-        def __iter__(self):
-            return iter(self._keys)
-
-        def __setitem__(self, key, value):
-            if key not in self:
-                self._keys.append(key)
-            super(OrderedDict, self).__setitem__(key, value)
-
-        def __delitem__(self, key):
-            super(OrderedDict, self).__delitem__(key)
-            self._keys.remove(key)
-
-        def iteritems(self):
-            return ((key, self[key]) for key in self)
-
-        # these aren't used or implemented, so disabling them for safety.
-        update = pop = popitem = clear = keys = iterkeys = None
+_INVALID_FIELD_CHARS = b":\n\r\t\x00"
 
 #=============================================================================
 # common helpers
