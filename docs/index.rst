@@ -5,6 +5,14 @@
 Passlib |release| documentation
 ==========================================
 
+.. only:: devcopy
+
+   .. warning::
+
+        This is the documentation for a development version of Passlib.
+        For documentation of the latest stable version,
+        see `<https://pythonhosted.com/passlib>`_.
+
 Welcome
 =======
 Passlib is a password hashing library for Python 2 & 3, which provides
@@ -33,9 +41,9 @@ using the :doc:`SHA256-Crypt </lib/passlib.hash.sha256_crypt>` algorithm::
 Content Summary
 ===============
 
-.. rst-class:: floater
+.. rst-class:: float-right inline-title
 
-.. seealso:: :ref:`What's new in Passlib 1.6.3 <whats-new>`
+.. seealso:: :ref:`What's new in Passlib 1.7 <whats-new>`
 
 Introductory Materials
 ----------------------
@@ -87,6 +95,12 @@ Application Helpers
 
     :mod:`passlib.ext.django`
         Django plugin which monkeypatches support for (almost) any hash in Passlib.
+
+    :mod:`passlib.pwd`
+        Password generation helpers.
+
+    :mod:`passlib.totp`
+        TOTP / Two Factor Authentication
 
 ..
     Support Modules

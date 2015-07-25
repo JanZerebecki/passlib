@@ -2,7 +2,7 @@
 #=============================================================================
 # imports
 #=============================================================================
-from passlib.utils.compat import PYPY, JYTHON
+from passlib.utils.compat import JYTHON
 # core
 from base64 import b64encode, b64decode
 from codecs import lookup as _lookup_codec
@@ -12,6 +12,7 @@ import math
 import os
 import sys
 import random
+import re
 if JYTHON: # pragma: no cover -- runtime detection
     # Jython 2.5.2 lacks stringprep module -
     # see http://bugs.jython.org/issue1758320
@@ -29,13 +30,12 @@ from warnings import warn
 # site
 # pkg
 from passlib.exc import ExpectedStringError
-from passlib.utils.compat import add_doc, b, bytes, join_bytes, join_byte_values, \
-                                 join_byte_elems, exc_err, irange, imap, PY3, u, \
-                                 join_unicode, unicode, byte_elem_value, PY_MIN_32, next_method_attr
+from passlib.utils.compat import add_doc, join_bytes, join_byte_values, \
+                                 join_byte_elems, irange, imap, PY3, u, \
+                                 join_unicode, unicode, byte_elem_value, nextgetter
 # local
 __all__ = [
     # constants
-    'PYPY',
     'JYTHON',
     'sys_bits',
     'unix_crypt_schemes',
@@ -109,7 +109,7 @@ rounds_cost_values = [ "linear", "log2" ]
 from passlib.exc import MissingBackendError
 
 # internal helpers
-_BEMPTY = b('')
+_BEMPTY = b''
 _UEMPTY = u("")
 _USPACE = u(" ")
 
@@ -481,7 +481,8 @@ def render_bytes(source, *args):
                             else arg for arg in args)
     return result.encode("latin-1")
 
-if PY_MIN_32:
+if PY3:
+    # new in py32
     def bytes_to_int(value):
         return int.from_bytes(value, 'big')
     def int_to_bytes(value, count):
@@ -491,13 +492,8 @@ else:
     from binascii import hexlify, unhexlify
     def bytes_to_int(value):
         return int(hexlify(value),16)
-    if PY3:
-        # grr, why did py3 have to break % for bytes?
-        def int_to_bytes(value, count):
-            return unhexlify((('%%0%dx' % (count<<1)) % value).encode("ascii"))
-    else:
-        def int_to_bytes(value, count):
-            return unhexlify(('%%0%dx' % (count<<1)) % value)
+    def int_to_bytes(value, count):
+        return unhexlify(('%%0%dx' % (count<<1)) % value)
 
 add_doc(bytes_to_int, "decode byte string as single big-endian integer")
 add_doc(int_to_bytes, "encode integer as single big-endian byte string")
@@ -515,7 +511,7 @@ def repeat_string(source, size):
     else:
         return source[:size]
 
-_BNULL = b("\x00")
+_BNULL = b"\x00"
 _UNULL = u("\x00")
 
 def right_pad_string(source, size, pad=None):
@@ -531,7 +527,7 @@ def right_pad_string(source, size, pad=None):
 #=============================================================================
 # encoding helpers
 #=============================================================================
-_ASCII_TEST_BYTES = b("\x00\n aA:#!\x7f")
+_ASCII_TEST_BYTES = b"\x00\n aA:#!\x7f"
 _ASCII_TEST_UNICODE = _ASCII_TEST_BYTES.decode("ascii")
 
 def is_ascii_codec(codec):
@@ -546,7 +542,7 @@ def is_same_codec(left, right):
         return False
     return _lookup_codec(left).name == _lookup_codec(right).name
 
-_B80 = b('\x80')[0]
+_B80 = b'\x80'[0]
 _U80 = u('\x80')
 def is_ascii_safe(source):
     """Check if string (bytes or unicode) contains only 7-bit ascii"""
@@ -799,9 +795,9 @@ class Base64Engine(object):
             raise TypeError("source must be bytes, not %s" % (type(source),))
         chunks, tail = divmod(len(source), 3)
         if PY3:
-            next_value = iter(source).__next__
+            next_value = nextgetter(iter(source))
         else:
-            next_value = (ord(elem) for elem in source).next
+            next_value = nextgetter(ord(elem) for elem in source)
         gen = self._encode_bytes(next_value, chunks, tail)
         out = join_byte_elems(imap(self._encode64, gen))
         ##if tail:
@@ -908,11 +904,10 @@ class Base64Engine(object):
         if tail == 1:
             # only 6 bits left, can't encode a whole byte!
             raise ValueError("input string length cannot be == 1 mod 4")
-        next_value = getattr(imap(self._decode64, source), next_method_attr)
+        next_value = nextgetter(imap(self._decode64, source))
         try:
             return join_byte_values(self._decode_bytes(next_value, chunks, tail))
-        except KeyError:
-            err = exc_err()
+        except KeyError as err:
             raise ValueError("invalid character: %r" % (err.args[0],))
 
     def _decode_bytes_little(self, next_value, chunks, tail):
@@ -1289,10 +1284,10 @@ bcrypt64 = LazyBase64Engine(BCRYPT_CHARS, big=True)
 #=============================================================================
 # adapted-base64 encoding
 #=============================================================================
-_A64_ALTCHARS = b("./")
-_A64_STRIP = b("=\n")
-_A64_PAD1 = b("=")
-_A64_PAD2 = b("==")
+_A64_ALTCHARS = b"./"
+_A64_STRIP = b"=\n"
+_A64_PAD1 = b"="
+_A64_PAD2 = b"=="
 
 def ab64_encode(data):
     """encode using variant of base64
@@ -1430,6 +1425,13 @@ else:
     # On most other platforms the best timer is time.time()
     from time import time as tick
 
+def parse_version(source):
+    """helper to parse version string"""
+    m = re.search(r"(\d+(?:\.\d+)+)", source)
+    if m:
+        return tuple(int(elem) for elem in m.group(1).split("."))
+    return None
+
 #=============================================================================
 # randomness
 #=============================================================================
@@ -1540,6 +1542,8 @@ def getrandstr(rng, charset, count):
 
 _52charset = '2346789ABCDEFGHJKMNPQRTUVWXYZabcdefghjkmnpqrstuvwxyz'
 
+@deprecated_function(deprecated="1.7", removed="2.0",
+                     replacement="passlib.pwd.generate()")
 def generate_password(size=10, charset=_52charset):
     """generate random password using given length & charset
 

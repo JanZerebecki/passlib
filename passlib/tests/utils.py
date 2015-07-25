@@ -9,21 +9,21 @@ import re
 import os
 import sys
 import tempfile
+import threading
 import time
 from passlib.exc import PasslibHashWarning
-from passlib.utils.compat import PY27, PY_MIN_32, PY3, JYTHON
+from passlib.utils.compat import PY3, JYTHON
 import warnings
 from warnings import warn
 # site
 # pkg
 from passlib.exc import MissingBackendError
 import passlib.registry as registry
-from passlib.tests.backports import TestCase as _TestCase, catch_warnings, skip, skipIf, skipUnless
+from passlib.tests.backports import TestCase as _TestCase, skip, skipIf, skipUnless, SkipTest
 from passlib.utils import has_rounds_info, has_salt_info, rounds_cost_values, \
                           classproperty, rng, getrandstr, is_ascii_safe, to_native_str, \
                           repeat_string, tick
-from passlib.utils.compat import b, bytes, iteritems, irange, callable, \
-                                 base_string_types, exc_err, u, unicode, PY2
+from passlib.utils.compat import iteritems, irange, u, unicode, PY2
 import passlib.utils.handlers as uh
 # local
 __all__ = [
@@ -102,13 +102,6 @@ def TEST_MODE(min=None, max=None):
 #=============================================================================
 # hash object inspection
 #=============================================================================
-def has_crypt_support(handler):
-    """check if host's crypt() supports this natively"""
-    if hasattr(handler, "orig_prefix"):
-        # ignore wrapper classes
-        return False
-    return 'os_crypt' in getattr(handler, "backends", ()) and handler.has_backend("os_crypt")
-
 def has_relaxed_setting(handler):
     """check if handler supports 'relaxed' kwd"""
     # FIXME: I've been lazy, should probably just add 'relaxed' kwd
@@ -124,7 +117,7 @@ def has_relaxed_setting(handler):
 def has_active_backend(handler):
     """return active backend for handler, if any"""
     if not hasattr(handler, "get_backend"):
-        return "builtin"
+        return "always"
     try:
         return handler.get_backend()
     except MissingBackendError:
@@ -141,25 +134,25 @@ def is_default_backend(handler, backend):
     finally:
         handler.set_backend(orig)
 
-class temporary_backend(object):
+def iter_alt_backends(handler, current=None, fallback=False):
     """
-    temporarily set handler to specific backend
+    iterate over alternate backends available to handler.
+
+    .. warning::
+        not thread-safe due to has_backend() call
     """
+    if current is None:
+        current = handler.get_backend()
+    backends = handler.backends
+    idx = backends.index(current)+1 if fallback else 0
+    for backend in backends[idx:]:
+        if backend != current and handler.has_backend(backend):
+            yield backend
 
-    _orig = None
-
-    def __init__(self, handler, backend=None):
-        self.handler = handler
-        self.backend = backend
-
-    def __enter__(self):
-        orig = self._orig = self.handler.get_backend()
-        if self.backend:
-            self.handler.set_backend(self.backend)
-        return orig
-
-    def __exit__(self, *exc_info):
-        self.handler.set_backend(self._orig)
+def get_alt_backend(*args, **kwds):
+    for backend in iter_alt_backends(*args, **kwds):
+        return backend
+    return None
 
 #=============================================================================
 # misc helpers
@@ -209,21 +202,6 @@ def quicksleep(delay):
 # custom test harness
 #=============================================================================
 
-def patchAttr(test, obj, attr, value):
-    """monkeypatch object value, restoring original on cleanup"""
-    try:
-        orig = getattr(obj, attr)
-    except AttributeError:
-        def cleanup():
-            try:
-                delattr(obj, attr)
-            except AttributeError:
-                pass
-        test.addCleanup(cleanup)
-    else:
-        test.addCleanup(setattr, obj, attr, orig)
-    setattr(obj, attr, value)
-
 class TestCase(_TestCase):
     """passlib-specific test case class
 
@@ -263,9 +241,6 @@ class TestCase(_TestCase):
         name = cls.__name__
         return name.startswith("_") or \
                getattr(cls, "_%s__unittest_skip" % name, False)
-
-        # make this mirror nose's '__test__' attr
-        return not getattr(cls, "__test__", True)
 
     @classproperty
     def __test__(cls):
@@ -380,7 +355,7 @@ class TestCase(_TestCase):
                                 "WarningMessage instance")
             self.assertEqual(wmsg.lineno, lineno, msg)
 
-    class _AssertWarningList(catch_warnings):
+    class _AssertWarningList(warnings.catch_warnings):
         """context manager for assertWarningList()"""
         def __init__(self, case, **kwds):
             self.case = case
@@ -489,6 +464,21 @@ class TestCase(_TestCase):
         queue.append(path)
         return path
 
+    def patchAttr(self, obj, attr, value):
+        """monkeypatch object value, restoring original value on cleanup"""
+        try:
+            orig = getattr(obj, attr)
+        except AttributeError:
+            def cleanup():
+                try:
+                    delattr(obj, attr)
+                except AttributeError:
+                    pass
+            self.addCleanup(cleanup)
+        else:
+            self.addCleanup(setattr, obj, attr, orig)
+        setattr(obj, attr, value)
+
     #===================================================================
     # eoc
     #===================================================================
@@ -567,7 +557,7 @@ class HandlerCase(TestCase):
     stock_passwords = [
         u("test"),
         u("\u20AC\u00A5$"),
-        b('\xe2\x82\xac\xc2\xa5$')
+        b'\xe2\x82\xac\xc2\xa5$'
     ]
 
     #---------------------------------------------------------------
@@ -598,7 +588,7 @@ class HandlerCase(TestCase):
         # anything that supports crypt() interface should forbid null chars,
         # since crypt() uses null-terminated strings.
         if 'os_crypt' in getattr(cls.handler, "backends", ()):
-            return b("\x00")
+            return b"\x00"
         return None
 
     #===================================================================
@@ -613,12 +603,6 @@ class HandlerCase(TestCase):
         if hasattr(handler, "get_backend"):
             name += " (%s backend)" % (handler.get_backend(),)
         return name
-
-    #===================================================================
-    # internal instance attrs
-    #===================================================================
-    # indicates safe_crypt() has been patched to use another backend of handler.
-    using_patched_crypt = False
 
     #===================================================================
     # support methods
@@ -728,63 +712,44 @@ class HandlerCase(TestCase):
     # automatically generate subclasses for testing specific backends,
     # and other backend helpers
     #---------------------------------------------------------------
+
+    BACKEND_NOT_AVAILABLE = "backend not available"
+
     @classmethod
-    def _enable_backend_case(cls, backend):
-        """helper for create_backend_cases(); returns reason to skip backend, or None"""
+    def _get_skip_backend_reason(cls, backend):
+        """
+        helper for create_backend_case() --
+        returns reason to skip backend, or None if backend should be tested
+        """
         handler = cls.handler
         if not is_default_backend(handler, backend) and not TEST_MODE("full"):
             return "only default backend is being tested"
         if handler.has_backend(backend):
             return None
-        if handler.name == "bcrypt" and backend == "builtin" and TEST_MODE("full"):
-            # this will be auto-enabled under TEST_MODE 'full'.
-            return None
-        from passlib.utils import has_crypt
-        if backend == "os_crypt" and has_crypt:
-            if TEST_MODE("full") and cls.find_crypt_replacement():
-                # in this case, HandlerCase will monkeypatch os_crypt
-                # to use another backend, just so we can test os_crypt fully.
-                return None
-            else:
-                return "hash not supported by os crypt()"
-        return "backend not available"
+        return cls.BACKEND_NOT_AVAILABLE
 
     @classmethod
-    def create_backend_cases(cls, backends, module=None):
+    def create_backend_case(cls, backend):
         handler = cls.handler
         name = handler.name
         assert hasattr(handler, "backends"), "handler must support uh.HasManyBackends protocol"
-        for backend in backends:
-            assert backend in handler.backends, "unknown backend: %r" % (backend,)
-            bases = (cls,)
-            if backend == "os_crypt":
-                bases += (OsCryptMixin,)
-            subcls = type(
-                "%s_%s_test" % (name, backend),
-                bases,
-                dict(
-                    descriptionPrefix = "%s (%s backend)" % (name, backend),
-                    backend = backend,
-                    __module__= module or cls.__module__,
-                )
+        assert backend in handler.backends, "unknown backend: %r" % (backend,)
+        bases = (cls,)
+        if backend == "os_crypt":
+            bases += (OsCryptMixin,)
+        subcls = type(
+            "%s_%s_test" % (name, backend),
+            bases,
+            dict(
+                descriptionPrefix="%s (%s backend)" % (name, backend),
+                backend=backend,
+                __module__=cls.__module__,
             )
-            skip_reason = cls._enable_backend_case(backend)
-            if skip_reason:
-                subcls = skip(skip_reason)(subcls)
-            yield subcls
-
-    @classmethod
-    def find_crypt_replacement(cls, fallback=False):
-        """find other backend which can be used to mock the os_crypt backend"""
-        handler = cls.handler
-        if fallback:
-            idx = handler.backends.index("os_crypt") + 1
-        else:
-            idx = 0
-        for name in handler.backends[idx:]:
-            if name != "os_crypt" and handler.has_backend(name):
-                return name
-        return None
+        )
+        skip_reason = cls._get_skip_backend_reason(backend)
+        if skip_reason:
+            subcls = skip(skip_reason)(subcls)
+        yield subcls
 
     #===================================================================
     # setup
@@ -961,38 +926,44 @@ class HandlerCase(TestCase):
 
     def test_05_backends(self):
         """test multi-backend support"""
+
+        # check that handler supports multiple backends
         handler = self.handler
         if not hasattr(handler, "set_backend"):
             raise self.skipTest("handler only has one backend")
-        with temporary_backend(handler):
-            for backend in handler.backends:
 
-                #
-                # validate backend name
-                #
-                self.assertIsInstance(backend, str)
-                self.assertNotIn(backend, RESERVED_BACKEND_NAMES,
-                                 "invalid backend name: %r" % (backend,))
+        # add cleanup func to restore old backend
+        self.addCleanup(handler.set_backend, handler.get_backend())
 
-                #
-                # ensure has_backend() returns bool value
-                #
-                ret = handler.has_backend(backend)
-                if ret is True:
-                    # verify backend can be loaded
-                    handler.set_backend(backend)
-                    self.assertEqual(handler.get_backend(), backend)
+        # run through each backend, make sure it works
+        for backend in handler.backends:
 
-                elif ret is False:
-                    # verify backend CAN'T be loaded
-                    self.assertRaises(MissingBackendError, handler.set_backend,
-                                      backend)
+            #
+            # validate backend name
+            #
+            self.assertIsInstance(backend, str)
+            self.assertNotIn(backend, RESERVED_BACKEND_NAMES,
+                             "invalid backend name: %r" % (backend,))
 
-                else:
-                    # didn't return boolean object. commonly fails due to
-                    # use of 'classmethod' decorator instead of 'classproperty'
-                    raise TypeError("has_backend(%r) returned invalid "
-                                    "value: %r" % (backend, ret))
+            #
+            # ensure has_backend() returns bool value
+            #
+            ret = handler.has_backend(backend)
+            if ret is True:
+                # verify backend can be loaded
+                handler.set_backend(backend)
+                self.assertEqual(handler.get_backend(), backend)
+
+            elif ret is False:
+                # verify backend CAN'T be loaded
+                self.assertRaises(MissingBackendError, handler.set_backend,
+                                  backend)
+
+            else:
+                # didn't return boolean object. commonly fails due to
+                # use of 'classmethod' decorator instead of 'classproperty'
+                raise TypeError("has_backend(%r) returned invalid "
+                                "value: %r" % (backend, ret))
 
     #===================================================================
     # salts
@@ -1030,20 +1001,19 @@ class HandlerCase(TestCase):
             raise AssertionError("default_salt_size must be <= max_salt_size")
 
         # check for 'salt_size' keyword
-        if 'salt_size' not in cls.setting_kwds and \
-                (not mx_set or cls.min_salt_size < cls.max_salt_size):
-            # NOTE: only bothering to issue warning if default_salt_size
-            # isn't maxed out
-            if (not mx_set or cls.default_salt_size < cls.max_salt_size):
-                warn("%s: hash handler supports range of salt sizes, "
-                     "but doesn't offer 'salt_size' setting" % (cls.name,))
+        # NOTE: skipping warning if default salt size is already maxed out
+        #       (might change that in future)
+        if 'salt_size' not in cls.setting_kwds and (not mx_set or cls.default_salt_size < cls.max_salt_size):
+            warn('%s: hash handler supports range of salt sizes, '
+                 'but doesn\'t offer \'salt_size\' setting' % (cls.name,))
 
         # check salt_chars & default_salt_chars
         if cls.salt_chars:
             if not cls.default_salt_chars:
                 raise AssertionError("default_salt_chars must not be empty")
-            if any(c not in cls.salt_chars for c in cls.default_salt_chars):
-                raise AssertionError("default_salt_chars must be subset of salt_chars: %r not in salt_chars" % (c,))
+            for c in cls.default_salt_chars:
+                if c not in cls.salt_chars:
+                    raise AssertionError("default_salt_chars must be subset of salt_chars: %r not in salt_chars" % (c,))
         else:
             if not cls.default_salt_chars:
                 raise AssertionError("default_salt_chars MUST be specified if salt_chars is empty")
@@ -1149,7 +1119,7 @@ class HandlerCase(TestCase):
             # should accept too-large salt in relaxed mode
             #
             if has_relaxed_setting(handler):
-                with catch_warnings(record=True): # issues passlibhandlerwarning
+                with warnings.catch_warnings(record=True): # issues passlibhandlerwarning
                     c2 = self.do_genconfig(salt=s2, relaxed=True)
                 self.assertEqual(c2, c1)
 
@@ -1225,7 +1195,7 @@ class HandlerCase(TestCase):
         # bytes should be accepted only if salt_type is bytes,
         # OR if salt type is unicode and running PY2 - to allow native strings.
         if not (salt_type is bytes or (PY2 and salt_type is unicode)):
-            self.assertRaises(TypeError, self.do_encrypt, 'stub', salt=b('x'))
+            self.assertRaises(TypeError, self.do_encrypt, 'stub', salt=b'x')
 
     #===================================================================
     # rounds
@@ -1676,7 +1646,7 @@ class HandlerCase(TestCase):
         #
         # test hash='' is rejected for all but the plaintext hashes
         #
-        for hash in [u(''), b('')]:
+        for hash in [u(''), b'']:
             if self.accepts_all_hashes:
                 # then it accepts empty string as well.
                 self.assertTrue(self.do_identify(hash))
@@ -1770,6 +1740,54 @@ class HandlerCase(TestCase):
                   self.descriptionPrefix,  count, len(verifiers),
                   ", ".join(vname(v) for v in verifiers))
 
+    def test_78_fuzz_threading(self):
+        """run test_77 simultaneously in multiple threads
+        in an attempt to detect any concurrency issues
+        (e.g. the bug fixed by pybcrypt 0.3)
+        """
+        import threading
+
+        # check if this test should run
+        if self.is_disabled_handler:
+            raise self.skipTest("not applicable")
+        thread_count = self.fuzz_thread_count
+        if thread_count < 1 or self.max_fuzz_time <= 0:
+            raise self.skipTest("disabled by test mode")
+
+        # buffer to hold errors thrown by threads
+        failed_lock = threading.Lock()
+        failed = [0]
+
+        # launch <thread count> threads, all of which run
+        # test_77_fuzz_input(), and see if any errors get thrown.
+        # if hash has concurrency issues, this should reveal it.
+        def wrapper():
+            try:
+                self.test_77_fuzz_input()
+            except SkipTest:
+                pass
+            except:
+                with failed_lock:
+                    failed[0] += 1
+                raise
+        def launch(n):
+            name = "Fuzz-Thread-%d (%s.test_78_fuzz_threading)" % (n, self.__class__.__name__)
+            thread = threading.Thread(target=wrapper, name=name)
+            thread.setDaemon(True)
+            thread.start()
+            return thread
+        threads = [launch(n) for n in irange(thread_count)]
+
+        # wait until all threads exit
+        # XXX: should this have a maximum timeout set?
+        for thread in threads:
+            thread.join()
+
+        # if any thread threw an error, raise one ourselves.
+        if failed[0]:
+            raise self.fail("%d/%d threads failed concurrent fuzz testing "
+                      "(see error log for details)" % (failed[0], thread_count))
+
     #---------------------------------------------------------------
     # fuzz constants & helpers
     #---------------------------------------------------------------
@@ -1793,9 +1811,18 @@ class HandlerCase(TestCase):
         else:
             return 5
 
-    def os_supports_ident(self, ident):
-        """whether native OS crypt() supports particular ident value"""
-        return True
+    @property
+    def fuzz_thread_count(self):
+        """number of threads for threaded fuzz testing"""
+        value = int(os.environ.get("PASSLIB_TEST_FUZZ_THREADS") or 0)
+        if value:
+            return value
+        elif TEST_MODE(max="quick"):
+            return 0
+        elif TEST_MODE(max="default"):
+            return 10
+        else:
+            return 20
 
     #---------------------------------------------------------------
     # fuzz verifiers
@@ -1820,18 +1847,18 @@ class HandlerCase(TestCase):
                     verifiers.append(func)
 
         # create verifiers for any other available backends
+        # NOTE: using subclass so we can load alt backend in threadsafe manner
         if hasattr(handler, "backends") and TEST_MODE("full"):
             def maker(backend):
+                sub_handler = handler.using()
+                sub_handler.set_backend(backend)
                 def func(secret, hash):
-                    with temporary_backend(handler, backend):
-                        return handler.verify(secret, hash)
+                    return sub_handler.verify(secret, hash)
                 func.__name__ = "check_" + backend + "_backend"
                 func.__doc__ = backend + "-backend"
                 return func
-            cur = handler.get_backend()
-            for backend in handler.backends:
-                if backend != cur and handler.has_backend(backend):
-                    verifiers.append(maker(backend))
+            for backend in iter_alt_backends(handler):
+                verifiers.append(maker(backend))
 
         return verifiers
 
@@ -1844,20 +1871,6 @@ class HandlerCase(TestCase):
         else:
             check_default.__doc__ = "self"
         return check_default
-
-    def fuzz_verifier_crypt(self):
-        """test results against OS crypt()"""
-        handler = self.handler
-        if self.using_patched_crypt or not has_crypt_support(handler):
-            return None
-        from crypt import crypt
-        def check_crypt(secret, hash):
-            """stdlib-crypt"""
-            if not self.os_supports_ident(hash):
-                return "skip"
-            secret = to_native_str(secret, self.fuzz_password_encoding)
-            return crypt(secret, hash) == hash
-        return check_crypt
 
     #---------------------------------------------------------------
     # fuzz settings generation
@@ -1903,10 +1916,7 @@ class HandlerCase(TestCase):
             return None
         # resolve wrappers before reading values
         handler = getattr(handler, "wrapped", handler)
-        ident = rng.choice(handler.ident_values)
-        if self.backend == "os_crypt" and not self.using_patched_crypt and not self.os_supports_ident(ident):
-            return None
-        return ident
+        return rng.choice(handler.ident_values)
 
     #---------------------------------------------------------------
     # fuzz password generation
@@ -1960,11 +1970,18 @@ class OsCryptMixin(HandlerCase):
     * check that native crypt support is detected correctly for known platforms.
     """
     #===================================================================
-    # option flags
+    # class attrs
     #===================================================================
+
     # platforms that are known to support / not support this hash natively.
     # list of (platform_regex, True|False|None) entries.
     platform_crypt_support = []
+
+    #: flag indicating backend provides a fallback when safe_crypt() can't handle password
+    has_os_crypt_fallback = True
+
+    #: alternate handler to use when searching for backend to fake safe_crypt() support.
+    alt_safe_crypt_handler = None
 
     #===================================================================
     # instance attrs
@@ -1983,13 +2000,28 @@ class OsCryptMixin(HandlerCase):
     def setUp(self):
         assert self.backend == "os_crypt"
         if not self.handler.has_backend("os_crypt"):
-            self.handler.get_backend() # hack to prevent recursion issue
             self._patch_safe_crypt()
         super(OsCryptMixin, self).setUp()
 
-    # alternate handler to use for fake os_crypt,
-    # e.g. bcrypt_sha256 uses bcrypt
-    fallback_os_crypt_handler = None
+    @classmethod
+    def _get_safe_crypt_handler_backend(cls):
+        """
+        return (handler, backend) pair to use for faking crypt.crypt() support for hash.
+        backend will be None if none availabe.
+        """
+        # find handler that generates safe_crypt() compatible hash
+        handler = cls.alt_safe_crypt_handler
+        if not handler:
+            handler = cls.handler
+            while hasattr(handler, "wrapped"):
+                handler = handler.wrapped
+
+        # hack to prevent recursion issue when .has_backend() is called
+        handler.get_backend()
+
+        # find backend which isn't os_crypt
+        alt_backend = get_alt_backend(handler, "os_crypt")
+        return handler, alt_backend
 
     def _patch_safe_crypt(self):
         """if crypt() doesn't support current hash alg, this patches
@@ -1997,58 +2029,81 @@ class OsCryptMixin(HandlerCase):
         backends, so that we can go ahead and test as much of code path
         as possible.
         """
-        handler = self.fallback_os_crypt_handler or self.handler
-        # resolve wrappers, since we want to return crypt compatible hash.
-        while hasattr(handler, "wrapped"):
-            handler = handler.wrapped
-        alt_backend = self.find_crypt_replacement()
+        # find handler & backend
+        handler, alt_backend = self._get_safe_crypt_handler_backend()
         if not alt_backend:
-            raise AssertionError("handler has no available backends!")
+            raise AssertionError("handler has no available alternate backends!")
 
-        # create subclass of handler, which we swap to an alternate backend.
-        # NOTE: not switching original class's backend, since classes like bcrypt
-        #       run some checks when backend is set, that can cause recursion error
-        #       when orig backend is restored.
-        alt_handler = type('%s_%s_wrapper' % (handler.name, alt_backend), (handler,), {})
-        alt_handler._backend = None  # ensure full backend load into subclass
+        # create subclass of handler, which we swap to an alternate backend
+        alt_handler = handler.using()
         alt_handler.set_backend(alt_backend)
 
-        import passlib.utils as mod
-
         def crypt_stub(secret, hash):
-            # with temporary_backend(alt_handler, alt_backend):
             hash = alt_handler.genhash(secret, hash)
             assert isinstance(hash, str)
             return hash
 
-        self.addCleanup(setattr, mod, "_crypt", mod._crypt)
-        mod._crypt = crypt_stub
+        import passlib.utils as mod
+        self.patchAttr(mod, "_crypt", crypt_stub)
         self.using_patched_crypt = True
+
+    @classmethod
+    def _get_skip_backend_reason(cls, backend):
+        """
+        make sure os_crypt backend is tested
+        when it's known os_crypt will be faked by _patch_safe_crypt()
+        """
+        assert backend == "os_crypt"
+        reason = super(OsCryptMixin, cls)._get_skip_backend_reason(backend)
+
+        from passlib.utils import has_crypt
+        if reason == cls.BACKEND_NOT_AVAILABLE and has_crypt:
+            if TEST_MODE("full") and cls._get_safe_crypt_handler_backend()[1]:
+                # in this case, _patch_safe_crypt() will monkeypatch os_crypt
+                # to use another backend, just so we can test os_crypt fully.
+                return None
+            else:
+                return "hash not supported by os crypt()"
+
+        return reason
 
     #===================================================================
     # custom tests
     #===================================================================
+
+    # TODO: turn into decorator, and use mock library.
     def _use_mock_crypt(self):
-        """patch safe_crypt() so it returns mock value"""
+        """
+        patch passlib.utils.safe_crypt() so it returns mock value for duration of test.
+        returns function whose .return_value controls what's returned.
+        this defaults to None.
+        """
         import passlib.utils as mod
-        if not self.using_patched_crypt:
-            self.addCleanup(setattr, mod, "_crypt", mod._crypt)
-        crypt_value = [None]
-        mod._crypt = lambda secret, config: crypt_value[0]
-        def setter(value):
-            crypt_value[0] = value
-        return setter
+
+        def mock_crypt(secret, config):
+            # let 'test' string through so _load_os_crypt_backend() will still work
+            if secret == "test":
+                return mock_crypt.__wrapped__(secret, config)
+            else:
+                return mock_crypt.return_value
+
+        mock_crypt.__wrapped__ = mod._crypt
+        mock_crypt.return_value = None
+
+        self.patchAttr(mod, "_crypt", mock_crypt)
+
+        return mock_crypt
 
     def test_80_faulty_crypt(self):
         """test with faulty crypt()"""
         hash = self.get_sample_hash()[1]
         exc_types = (AssertionError,)
-        setter = self._use_mock_crypt()
+        mock_crypt = self._use_mock_crypt()
 
         def test(value):
             # set safe_crypt() to return specified value, and
             # make sure assertion error is raised by handler.
-            setter(value)
+            mock_crypt.return_value = value
             self.assertRaises(exc_types, self.do_genhash, "stub", hash)
             self.assertRaises(exc_types, self.do_encrypt, "stub")
             self.assertRaises(exc_types, self.do_verify, "stub", hash)
@@ -2059,11 +2114,13 @@ class OsCryptMixin(HandlerCase):
 
     def test_81_crypt_fallback(self):
         """test per-call crypt() fallback"""
-        # set safe_crypt to return None
-        setter = self._use_mock_crypt()
-        setter(None)
-        if self.find_crypt_replacement(fallback=True):
-            # handler should have a fallback to use
+
+        # mock up safe_crypt to return None
+        mock_crypt = self._use_mock_crypt()
+        mock_crypt.return_value = None
+
+        if self.has_os_crypt_fallback:
+            # handler should have a fallback to use when os_crypt backend refuses to handle secret.
             h1 = self.do_encrypt("stub")
             h2 = self.do_genhash("stub", h1)
             self.assertEqual(h2, h1)
@@ -2100,6 +2157,37 @@ class OsCryptMixin(HandlerCase):
         else:
             self.fail("did not expect %r platform would have native support "
                       "for %r" % (platform, self.handler.name))
+
+    #===================================================================
+    # fuzzy verified support -- add new verified that uses os crypt()
+    #===================================================================
+    def fuzz_verifier_crypt(self):
+        """test results against OS crypt()"""
+
+        # don't use this if we're faking safe_crypt (pointless test),
+        # or if handler is a wrapper (only original handler will be supported by os)
+        handler = self.handler
+        if self.using_patched_crypt or hasattr(handler, "wrapped"):
+            return None
+
+        # create a wrapper for fuzzy verified to use
+        from crypt import crypt
+
+        def check_crypt(secret, hash):
+            """stdlib-crypt"""
+            if not self.crypt_supports_variant(hash):
+                return "skip"
+            secret = to_native_str(secret, self.fuzz_password_encoding)
+            return crypt(secret, hash) == hash
+
+        return check_crypt
+
+    def crypt_supports_variant(self, hash):
+        """
+        fuzzy_verified_crypt() helper --
+        used to determine if os crypt() supports a particular hash variant.
+        """
+        return True
 
     #===================================================================
     # eoc
@@ -2213,7 +2301,7 @@ class EncodingHandlerMixin(HandlerCase):
     # so different encodings can be tested safely.
     stock_passwords = [
         u("test"),
-        b("test"),
+        b"test",
         u("\u00AC\u00BA"),
     ]
 
@@ -2232,7 +2320,7 @@ class EncodingHandlerMixin(HandlerCase):
 #=============================================================================
 # warnings helpers
 #=============================================================================
-class reset_warnings(catch_warnings):
+class reset_warnings(warnings.catch_warnings):
     """catch_warnings() wrapper which clears warning registry & filters"""
     def __init__(self, reset_filter="always", reset_registry=".*", **kwds):
         super(reset_warnings, self).__init__(**kwds)

@@ -4,10 +4,7 @@
 #=============================================================================
 from __future__ import with_statement
 # core
-import hashlib
 from logging import getLogger
-import os
-import time
 import warnings
 import sys
 # site
@@ -16,7 +13,7 @@ from passlib import hash, registry, exc
 from passlib.registry import register_crypt_handler, register_crypt_handler_path, \
     get_crypt_handler, list_crypt_handlers, _unload_handler_name as unload_handler_name
 import passlib.utils.handlers as uh
-from passlib.tests.utils import TestCase, catch_warnings
+from passlib.tests.utils import TestCase
 # module
 log = getLogger(__name__)
 
@@ -130,7 +127,7 @@ class RegistryTest(TestCase):
         # TODO: check lazy load which calls register_crypt_handler (warning should be issued)
         sys.modules.pop("passlib.tests._test_bad_register", None)
         register_crypt_handler_path("dummy_bad", "passlib.tests._test_bad_register")
-        with catch_warnings():
+        with warnings.catch_warnings():
             warnings.filterwarnings("ignore", "xxxxxxxxxx", DeprecationWarning)
             h = get_crypt_handler("dummy_bad")
         from passlib.tests import _test_bad_register as tbr
@@ -181,7 +178,7 @@ class RegistryTest(TestCase):
         register_crypt_handler(dummy_1)
         self.assertIs(get_crypt_handler("dummy_1"), dummy_1)
 
-        with catch_warnings():
+        with warnings.catch_warnings():
             warnings.filterwarnings("ignore", "handler names should be lower-case, and use underscores instead of hyphens:.*", UserWarning)
 
             # already loaded handler, using incorrect name

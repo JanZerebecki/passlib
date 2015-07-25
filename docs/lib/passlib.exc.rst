@@ -19,6 +19,8 @@ Exceptions
 
 .. autoexception:: PasslibSecurityError
 
+.. autoexception:: TokenReuseError
+
 Warnings
 ========
 .. autoexception:: PasslibWarning
